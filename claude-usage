@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+import json, os, time, urllib.request, sys
+
+CACHE_FILE = os.path.expanduser('~/.claude/cc-usage-quota-cache.json')
+CREDS_FILE = os.path.expanduser('~/.claude/.credentials.json')
+CACHE_TTL = 180
+
+def load_cache():
+    try:
+        if os.path.exists(CACHE_FILE):
+            return json.load(open(CACHE_FILE))
+    except Exception:
+        pass
+    return None
+
+def get_cached():
+    try:
+        if os.path.exists(CACHE_FILE):
+            if time.time() - os.path.getmtime(CACHE_FILE) < CACHE_TTL:
+                return json.load(open(CACHE_FILE))
+    except Exception:
+        pass
+    return None
+
+def fetch_usage(token):
+    req = urllib.request.Request(
+        'https://api.anthropic.com/api/oauth/usage',
+        headers={
+            'Authorization': f'Bearer {token}',
+            'anthropic-beta': 'oauth-2025-04-20',
+        }
+    )
+    data = json.loads(urllib.request.urlopen(req, timeout=5).read())
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(data, f)
+    return data
+
+def main():
+    data = get_cached()
+    if data is None:
+        try:
+            creds = json.load(open(CREDS_FILE))
+            token = creds['claudeAiOauth']['accessToken']
+            data = fetch_usage(token)
+        except Exception:
+            data = load_cache()
+    if data is None:
+        return
+
+    extra = data.get('extra_usage') or {}
+    if extra.get('is_enabled'):
+        used = extra.get('used_credits', 0) / 100
+        limit = extra.get('monthly_limit', 0) / 100
+        pct = extra.get('utilization', 0)
+        print(f'${used:.0f}/${limit:.0f} {pct:.1f}%', end='')
+        return
+
+    # Pro/Max/Team: 5h rolling + 7d rolling
+    five_h = data.get('five_hour') or {}
+    seven_d = data.get('seven_day') or {}
+    parts = []
+    if five_h.get('utilization') is not None:
+        parts.append(f"5h:{five_h['utilization']:.0f}%")
+    if seven_d.get('utilization') is not None:
+        parts.append(f"7d:{seven_d['utilization']:.0f}%")
+    if parts:
+        print(' '.join(parts), end='')
+
+main()

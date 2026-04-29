@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -o errexit -o nounset -o pipefail
+
+PROGRESS_COMPACT=80
+PROGRESS_YELLOW=40
+PROGRESS_RED=60
+
+HAIKU_NERD=" "
+SONNET_NERD="󰚩 "
+OPUS_NERD="󱚦 "
+BRANCH_ICON=$' '
+
+# Catppuccin Latte
+C_DIR="\033[38;2;4;165;229m"        # Sky
+C_GIT_BRANCH="\033[38;2;234;118;203m"  # Pink
+C_GIT_STATUS="\033[38;2;136;57;239m"   # Mauve
+C_MODEL="\033[38;2;114;135;253m"    # Lavender
+C_CONTEXT="\033[38;2;254;100;11m"   # Peach
+C_USAGE="\033[38;2;30;102;245m"     # Blue
+RESET="\033[0m"
+
+show_progress=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --no-progress) show_progress=0; shift ;;
+  *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+payload="$(cat || true)"
+
+model_nerd=""
+context_str="~~%"
+percent_used=""
+dir=""
+
+if command -v jq >/dev/null 2>&1 && [ -n "$payload" ]; then
+  jq_output="$(printf '%s' "$payload" | jq -r '
+    [
+      (.model.display_name // .model.id // ""),
+      (.context_window.context_window_size // ""),
+      (if .context_window.current_usage == null then "" else (.context_window.current_usage.input_tokens // 0) end),
+      (if .context_window.current_usage == null then "" else (.context_window.current_usage.cache_creation_input_tokens // 0) end),
+      (if .context_window.current_usage == null then "" else (.context_window.current_usage.cache_read_input_tokens // 0) end),
+      (.workspace.current_dir // .workspace.project_dir // .cwd // "")
+    ] | .[]
+  ')"
+
+  values=("" "" "" "" "" "")
+  if [ -n "$jq_output" ]; then
+    if command -v mapfile >/dev/null 2>&1; then
+      mapfile -t values <<<"$jq_output"
+    else
+      i=0
+      while IFS= read -r line; do
+        values[i]="$line"
+        i=$((i + 1))
+      done <<<"$jq_output"
+    fi
+  fi
+
+  raw_model="${values[0]:-}"
+  context_size="${values[1]:-}"
+  input_tokens="${values[2]:-}"
+  cache_creation="${values[3]:-}"
+  cache_read="${values[4]:-}"
+  dir="${values[5]:-}"
+
+  if [ -n "$dir" ] && [ -d "$dir" ]; then
+    cd "$dir"
+  fi
+
+  if [ -n "$raw_model" ]; then
+    if [[ "${BASH_VERSINFO[0]:-0}" -ge 4 ]]; then
+      lower_model="${raw_model,,}"
+    else
+      lower_model="$(printf '%s' "$raw_model" | tr '[:upper:]' '[:lower:]')"
+    fi
+    case "$lower_model" in
+    *haiku*)  icon="$HAIKU_NERD" ;;
+    *sonnet*) icon="$SONNET_NERD" ;;
+    *opus*)   icon="$OPUS_NERD" ;;
+    *)        icon="$SONNET_NERD" ;;
+    esac
+    model_nerd="$icon$lower_model"
+  fi
+
+  if [ -n "$context_size" ] && [ "$context_size" != "null" ] && [ -n "$input_tokens" ]; then
+    current_tokens=$((${input_tokens:-0} + ${cache_creation:-0} + ${cache_read:-0}))
+    if [ "$current_tokens" -gt 0 ]; then
+      percent_used=$((current_tokens * 100 / context_size))
+      context_str="$(printf '%3s' "${percent_used}%")"
+    fi
+  fi
+fi
+
+# Directory: last 2 components
+short_dir="$(pwd | awk -F/ '{print (NF>2) ? $(NF-1)"/"$NF : $0}')"
+
+# Git
+git_branch=""
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+fi
+
+# Usage
+_usage_cmd="${HOME}/.local/bin/claude-usage"
+if ! command -v "$_usage_cmd" >/dev/null 2>&1; then
+  _usage_cmd="claude-usage"
+fi
+usage_str="$("$_usage_cmd" 2>/dev/null || true)"
+
+# Render
+out="${C_DIR}${short_dir}${RESET}"
+if [ -n "$git_branch" ]; then
+  out+=" ${C_GIT_BRANCH}${BRANCH_ICON}${git_branch}${RESET}"
+fi
+[ -n "$model_nerd" ]  && out+=" ${C_MODEL}${model_nerd}${RESET}"
+out+=" ${C_CONTEXT}${context_str}${RESET}"
+[ -n "$usage_str" ]   && out+=" ${C_USAGE}${usage_str}${RESET}"
+
+printf '%b\n' "$out"
+
+# OSC 9;4 progress bar
+if [ "$show_progress" = "1" ] && [ -n "${percent_used:-}" ]; then
+  if [ "$percent_used" -ge "$PROGRESS_COMPACT" ]; then
+    progress_percent=100
+  else
+    progress_percent=$((percent_used * 100 / PROGRESS_COMPACT))
+  fi
+  if [ "$percent_used" -ge "$PROGRESS_RED" ]; then
+    progress_state=2
+  elif [ "$percent_used" -ge "$PROGRESS_YELLOW" ]; then
+    progress_state=4
+  else
+    progress_state=1
+  fi
+  printf '\033]9;4;%d;%d\a' "$progress_state" "$progress_percent" >/dev/tty 2>/dev/null || true
+fi
