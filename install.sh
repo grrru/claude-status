@@ -23,7 +23,7 @@ except FileNotFoundError:
 
 d.setdefault("statusLine", {}).update({
     "type": "command",
-    "command": "~/.local/bin/claude-status",
+    "command": "\$HOME/.local/bin/claude-status",
     "padding": 0,
 })
 

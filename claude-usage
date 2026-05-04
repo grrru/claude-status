@@ -35,14 +35,32 @@ def fetch_usage(token):
         json.dump(data, f)
     return data
 
+def get_token():
+    try:
+        return json.load(open(CREDS_FILE))['claudeAiOauth']['accessToken']
+    except Exception:
+        pass
+    try:
+        import subprocess
+        raw = subprocess.check_output(
+            ['security', 'find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+            stderr=subprocess.DEVNULL,
+        )
+        return json.loads(raw)['claudeAiOauth']['accessToken']
+    except Exception:
+        pass
+    return None
+
 def main():
     data = get_cached()
     if data is None:
-        try:
-            creds = json.load(open(CREDS_FILE))
-            token = creds['claudeAiOauth']['accessToken']
-            data = fetch_usage(token)
-        except Exception:
+        token = get_token()
+        if token:
+            try:
+                data = fetch_usage(token)
+            except Exception:
+                data = load_cache()
+        else:
             data = load_cache()
     if data is None:
         return
