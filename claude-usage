@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json, os, time, urllib.request, sys
+from datetime import datetime
 
 CACHE_FILE = os.path.expanduser('~/.claude/cc-usage-quota-cache.json')
 CREDS_FILE = os.path.expanduser('~/.claude/.credentials.json')
@@ -22,7 +23,7 @@ def get_cached():
         pass
     return None
 
-def fetch_usage(token):
+def fetch_usage(token, subscription_type=None):
     req = urllib.request.Request(
         'https://api.anthropic.com/api/oauth/usage',
         headers={
@@ -31,13 +32,18 @@ def fetch_usage(token):
         }
     )
     data = json.loads(urllib.request.urlopen(req, timeout=5).read())
+    # API 응답에는 플랜 이름이 없어서 자격증명의 subscriptionType을 같이 남긴다
+    if subscription_type:
+        data['subscription_type'] = subscription_type
     with open(CACHE_FILE, 'w') as f:
         json.dump(data, f)
     return data
 
-def get_token():
+def get_credentials():
+    """(accessToken, subscriptionType) — 없으면 (None, None)"""
     try:
-        return json.load(open(CREDS_FILE))['claudeAiOauth']['accessToken']
+        oauth = json.load(open(CREDS_FILE))['claudeAiOauth']
+        return oauth['accessToken'], oauth.get('subscriptionType')
     except Exception:
         pass
     try:
@@ -46,42 +52,87 @@ def get_token():
             ['security', 'find-generic-password', '-s', 'Claude Code-credentials', '-w'],
             stderr=subprocess.DEVNULL,
         )
-        return json.loads(raw)['claudeAiOauth']['accessToken']
+        oauth = json.loads(raw)['claudeAiOauth']
+        return oauth['accessToken'], oauth.get('subscriptionType')
     except Exception:
         pass
-    return None
+    return None, None
 
-def main():
+def get_usage():
     data = get_cached()
     if data is None:
-        token = get_token()
+        token, subscription_type = get_credentials()
         if token:
             try:
-                data = fetch_usage(token)
+                data = fetch_usage(token, subscription_type)
             except Exception:
                 data = load_cache()
         else:
             data = load_cache()
-    if data is None:
-        return
+    return data
 
-    extra = data.get('extra_usage') or {}
-    if extra.get('is_enabled'):
-        used = extra.get('used_credits', 0) / 100
-        limit = extra.get('monthly_limit', 0) / 100
-        pct = extra.get('utilization', 0)
-        print(f'${used:.0f}/${limit:.0f} {pct:.1f}%', end='')
-        return
+def _epoch(value):
+    """resets_at — statusLine 입력은 epoch 초, API 응답은 ISO 문자열"""
+    if value is None or isinstance(value, (int, float)):
+        return value
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+    except Exception:
+        return None
+
+def has_windows(data, rate_limits=None):
+    return bool(subscription_windows(data, rate_limits))
+
+def detect_plan(data, rate_limits=None):
+    """'enterprise' 또는 'subscription' (Pro/Max/Team)"""
+    data = data or {}
+    sub = (data.get('subscription_type') or '').lower()
+    if sub:
+        return 'enterprise' if 'enterprise' in sub else 'subscription'
+    if has_windows(data, rate_limits):
+        return 'subscription'
+    if (data.get('extra_usage') or {}).get('is_enabled'):
+        return 'enterprise'
+    return 'subscription'
+
+def subscription_windows(data, rate_limits=None):
+    """[(라벨, 사용률 %, 리셋 epoch)] — statusLine 입력의 rate_limits가 있으면 캐시보다 우선"""
+    windows = []
+    for key, label in (('five_hour', '5h'), ('seven_day', '7d')):
+        live = (rate_limits or {}).get(key) or {}
+        cached = (data or {}).get(key) or {}
+        if live.get('used_percentage') is not None:
+            windows.append((label, live['used_percentage'], _epoch(live.get('resets_at'))))
+        elif cached.get('utilization') is not None:
+            windows.append((label, cached['utilization'], _epoch(cached.get('resets_at'))))
+    return windows
+
+def monthly_credits(data):
+    """Enterprise 월 사용량 (used, limit, utilization) — 꺼져 있으면 None"""
+    extra = (data or {}).get('extra_usage') or {}
+    if not extra.get('is_enabled'):
+        return None
+    unit = 10 ** (extra.get('decimal_places') or 2)
+    used = (extra.get('used_credits') or 0) / unit
+    limit = (extra.get('monthly_limit') or 0) / unit
+    return used, limit, extra.get('utilization') or 0
+
+def format_usage(data, plan, rate_limits=None):
+    if plan == 'enterprise':
+        credits = monthly_credits(data)
+        if credits is None:
+            return ''
+        used, limit, pct = credits
+        return f'${used:.0f}/${limit:.0f} {pct:.1f}%'
 
     # Pro/Max/Team: 5h rolling + 7d rolling
-    five_h = data.get('five_hour') or {}
-    seven_d = data.get('seven_day') or {}
-    parts = []
-    if five_h.get('utilization') is not None:
-        parts.append(f"5h:{five_h['utilization']:.0f}%")
-    if seven_d.get('utilization') is not None:
-        parts.append(f"7d:{seven_d['utilization']:.0f}%")
-    if parts:
-        print(' '.join(parts), end='')
+    return ' '.join(f'{label}:{pct:.0f}%' for label, pct, _ in subscription_windows(data, rate_limits))
 
-main()
+def main():
+    data = get_usage()
+    if data is None:
+        return
+    print(format_usage(data, detect_plan(data)), end='')
+
+if __name__ == '__main__':
+    main()

@@ -1,139 +1,656 @@
-#!/usr/bin/env bash
-set -o errexit -o nounset -o pipefail
+#!/usr/bin/env python3
+import json, os, subprocess, sys, time
 
-PROGRESS_COMPACT=80
-PROGRESS_YELLOW=40
-PROGRESS_RED=60
+PROGRESS_COMPACT = 80
+PROGRESS_YELLOW = 40
+PROGRESS_RED = 60
 
-HAIKU_NERD=" "
-SONNET_NERD="󰚩 "
-OPUS_NERD="󱚦 "
-BRANCH_ICON=$' '
+HAIKU_NERD = ' '
+SONNET_NERD = '\U000f06a9 '   # 󰚩
+OPUS_NERD = '\U000f16a6 '     # 󱚦
+BRANCH_ICON = ' '       #
+
+def rgb(r, g, b):
+    return f'\033[38;2;{r};{g};{b}m'
 
 # Catppuccin Latte
-C_DIR="\033[38;2;4;165;229m"        # Sky
-C_GIT_BRANCH="\033[38;2;234;118;203m"  # Pink
-C_GIT_STATUS="\033[38;2;136;57;239m"   # Mauve
-C_MODEL="\033[38;2;114;135;253m"    # Lavender
-C_CONTEXT="\033[38;2;254;100;11m"   # Peach
-C_USAGE="\033[38;2;30;102;245m"     # Blue
-RESET="\033[0m"
+C_DIR = rgb(4, 165, 229)            # Sky
+C_GIT_BRANCH = rgb(234, 118, 203)   # Pink
+C_GIT_STATUS = rgb(136, 57, 239)    # Mauve
+C_MODEL = rgb(114, 135, 253)        # Lavender
+C_CONTEXT = rgb(254, 100, 11)       # Peach
+C_USAGE = rgb(30, 102, 245)         # Blue
+C_PR = rgb(32, 159, 181)            # Sapphire
+C_EFFORT = rgb(23, 146, 153)        # Teal
+C_THINKING = rgb(221, 120, 120)     # Flamingo
+C_STYLE = rgb(220, 138, 120)        # Rosewater
+C_PLAN = rgb(230, 69, 83)           # Maroon
+C_DIM = rgb(140, 143, 161)          # Overlay1
+C_GREEN = rgb(64, 160, 43)          # Green
+C_YELLOW = rgb(223, 142, 29)        # Yellow
+C_RED = rgb(210, 15, 57)            # Red
+RESET = '\033[0m'
 
-show_progress=1
-while [ $# -gt 0 ]; do
-  case "$1" in
-  --no-progress) show_progress=0; shift ;;
-  *) echo "Unknown option: $1" >&2; exit 1 ;;
-  esac
-done
+CONFIG_FILE = os.path.expanduser('~/.claude/claude-status.json')
 
-payload="$(cat || true)"
+PLANS = ('subscription', 'enterprise')
+PLAN_NAMES = {'subscription': '구독 (Pro/Max/Team)', 'enterprise': 'Enterprise'}
 
-model_nerd=""
-context_str="~~%"
-percent_used=""
-dir=""
+# (키, 설명, 쓸 수 있는 플랜) — 이 순서대로 그린다
+ELEMENTS = [
+    ('dir',            '디렉토리 (마지막 2단계)',         PLANS),
+    ('git',            'git 브랜치',                     PLANS),
+    ('git_status',     'git 변경(*)·ahead/behind',       PLANS),
+    ('pr',             '열린 PR + 리뷰 상태 (클릭 시 이동)', PLANS),
+    ('model',          '모델',                           PLANS),
+    ('effort',         'effort 레벨',                    PLANS),
+    ('thinking',       'extended thinking 켜짐',         PLANS),
+    ('output_style',   '출력 스타일 (기본값 외에만)',      PLANS),
+    ('version',        'Claude Code 버전',               PLANS),
+    ('context',        '컨텍스트 사용률',                 PLANS),
+    ('context_tokens', '컨텍스트 토큰 사용/전체',          PLANS),
+    ('context_bar',    '컨텍스트 바',                     PLANS),
+    ('cache',          '프롬프트 캐시 히트율·TTL',         PLANS),
+    ('cost',           '세션 누적 비용',                   PLANS),
+    ('lines',          '세션 변경 라인',                   PLANS),
+    ('duration',       '세션 경과 시간',                   PLANS),
+    ('plan',           '플랜 이름',                        PLANS),
+    ('usage',          '사용량 (구독: 5h/7d, Enterprise: 월 크레딧)', PLANS),
+    ('reset',          '5h/7d 리셋까지 남은 시간',          ('subscription',)),
+    ('credits',        '이번 달 남은 크레딧',               ('enterprise',)),
+]
 
-if command -v jq >/dev/null 2>&1 && [ -n "$payload" ]; then
-  jq_output="$(printf '%s' "$payload" | jq -r '
-    [
-      (.model.display_name // .model.id // ""),
-      (.context_window.context_window_size // ""),
-      (if .context_window.current_usage == null then "" else (.context_window.current_usage.input_tokens // 0) end),
-      (if .context_window.current_usage == null then "" else (.context_window.current_usage.cache_creation_input_tokens // 0) end),
-      (if .context_window.current_usage == null then "" else (.context_window.current_usage.cache_read_input_tokens // 0) end),
-      (.workspace.current_dir // .workspace.project_dir // .cwd // "")
-    ] | .[]
-  ')"
+DEFAULTS = {
+    'subscription': ['dir', 'git', 'model', 'context', 'usage', 'reset'],
+    'enterprise': ['dir', 'git', 'model', 'context', 'usage', 'cost'],
+}
 
-  values=("" "" "" "" "" "")
-  if [ -n "$jq_output" ]; then
-    if command -v mapfile >/dev/null 2>&1; then
-      mapfile -t values <<<"$jq_output"
-    else
-      i=0
-      while IFS= read -r line; do
-        values[i]="$line"
-        i=$((i + 1))
-      done <<<"$jq_output"
-    fi
-  fi
+PROGRESS_DESC = '터미널 진행바 (OSC 9;4, 두 플랜 공통)'
 
-  raw_model="${values[0]:-}"
-  context_size="${values[1]:-}"
-  input_tokens="${values[2]:-}"
-  cache_creation="${values[3]:-}"
-  cache_read="${values[4]:-}"
-  dir="${values[5]:-}"
+EFFORT_MARKS = {'low': '○', 'medium': '◐', 'high': '●', 'xhigh': '◉', 'max': '✦'}
+REVIEW_MARKS = {'approved': '✓', 'pending': '●', 'changes_requested': '✗', 'draft': '◌'}
 
-  if [ -n "$dir" ] && [ -d "$dir" ]; then
-    cd "$dir"
-  fi
+def load_usage_module():
+    """같은 폴더의 claude-usage를 모듈로 읽는다 (API·자격증명은 그쪽에만 있다)"""
+    from importlib.machinery import SourceFileLoader
+    from importlib.util import module_from_spec, spec_from_loader
+    sys.dont_write_bytecode = True
+    here = os.path.dirname(os.path.realpath(__file__))
+    for path in (os.path.join(here, 'claude-usage'), os.path.expanduser('~/.local/bin/claude-usage')):
+        if os.path.exists(path):
+            loader = SourceFileLoader('claude_usage', path)
+            module = module_from_spec(spec_from_loader('claude_usage', loader))
+            loader.exec_module(module)
+            return module
+    return None
 
-  if [ -n "$raw_model" ]; then
-    if [[ "${BASH_VERSINFO[0]:-0}" -ge 4 ]]; then
-      lower_model="${raw_model,,}"
-    else
-      lower_model="$(printf '%s' "$raw_model" | tr '[:upper:]' '[:lower:]')"
-    fi
-    case "$lower_model" in
-    *haiku*)  icon="$HAIKU_NERD" ;;
-    *sonnet*) icon="$SONNET_NERD" ;;
-    *opus*)   icon="$OPUS_NERD" ;;
-    *)        icon="$SONNET_NERD" ;;
-    esac
-    model_nerd="$icon$lower_model"
-  fi
+try:
+    usage_api = load_usage_module()
+except Exception:
+    usage_api = None
 
-  if [ -n "$context_size" ] && [ "$context_size" != "null" ] && [ -n "$input_tokens" ]; then
-    current_tokens=$((${input_tokens:-0} + ${cache_creation:-0} + ${cache_read:-0}))
-    if [ "$current_tokens" -gt 0 ]; then
-      percent_used=$((current_tokens * 100 / context_size))
-      context_str="$(printf '%3s' "${percent_used}%")"
-    fi
-  fi
-fi
+def dig(d, *keys):
+    for key in keys:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(key)
+    return d
 
-# Directory: last 2 components
-short_dir="$(pwd | awk -F/ '{print (NF>2) ? $(NF-1)"/"$NF : $0}')"
+def paint(color, text):
+    return f'{color}{text}{RESET}' if text else ''
 
-# Git
-git_branch=""
-if git rev-parse --git-dir >/dev/null 2>&1; then
-  git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-fi
+def link(url, text):
+    return f'\033]8;;{url}\033\\{text}\033]8;;\033\\' if url else text
 
-# Usage
-_usage_cmd="${HOME}/.local/bin/claude-usage"
-if ! command -v "$_usage_cmd" >/dev/null 2>&1; then
-  _usage_cmd="claude-usage"
-fi
-usage_str="$("$_usage_cmd" 2>/dev/null || true)"
+def short_dir(path):
+    parts = path.split('/')
+    return '/'.join(parts[-2:]) if len(parts) > 2 else path
 
-# Render
-out="${C_DIR}${short_dir}${RESET}"
-if [ -n "$git_branch" ]; then
-  out+=" ${C_GIT_BRANCH}${BRANCH_ICON}${git_branch}${RESET}"
-fi
-[ -n "$model_nerd" ]  && out+=" ${C_MODEL}${model_nerd}${RESET}"
-out+=" ${C_CONTEXT}${context_str}${RESET}"
-[ -n "$usage_str" ]   && out+=" ${C_USAGE}${usage_str}${RESET}"
+def fmt_tokens(n):
+    if n >= 1_000_000:
+        return f'{n / 1_000_000:.1f}M'
+    if n >= 1000:
+        return f'{n / 1000:.0f}k'
+    return str(n)
 
-printf '%b\n' "$out"
+def fmt_duration(seconds):
+    seconds = max(0, int(seconds))
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    if days:
+        return f'{days}d{hours}h'
+    if hours:
+        return f'{hours}h{minutes}m'
+    if minutes:
+        return f'{minutes}m'
+    return f'{secs}s'
 
-# OSC 9;4 progress bar
-if [ "$show_progress" = "1" ] && [ -n "${percent_used:-}" ]; then
-  if [ "$percent_used" -ge "$PROGRESS_COMPACT" ]; then
-    progress_percent=100
-  else
-    progress_percent=$((percent_used * 100 / PROGRESS_COMPACT))
-  fi
-  if [ "$percent_used" -ge "$PROGRESS_RED" ]; then
-    progress_state=2
-  elif [ "$percent_used" -ge "$PROGRESS_YELLOW" ]; then
-    progress_state=4
-  else
-    progress_state=1
-  fi
-  printf '\033]9;4;%d;%d\a' "$progress_state" "$progress_percent" >/dev/tty 2>/dev/null || true
-fi
+def read_git(cwd, with_status):
+    """(branch, dirty, ahead, behind) — git 저장소가 아니면 ()"""
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS='0')
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=2)
+    try:
+        if not with_status:
+            r = git('rev-parse', '--abbrev-ref', 'HEAD')
+            return (r.stdout.strip(), False, 0, 0) if r.returncode == 0 else ()
+        r = git('status', '--porcelain=v2', '--branch')
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    if r.returncode != 0:
+        return ()
+    branch, dirty, ahead, behind = '', False, 0, 0
+    for line in r.stdout.splitlines():
+        if line.startswith('# branch.head '):
+            branch = line.split(' ', 2)[2]
+            if branch == '(detached)':
+                branch = 'HEAD'
+        elif line.startswith('# branch.ab '):
+            a, b = line.split()[2:4]
+            ahead, behind = int(a), -int(b)
+        elif not line.startswith('#'):
+            dirty = True
+    return (branch, dirty, ahead, behind)
+
+class Status:
+    def __init__(self, payload, plan, elements, usage=None, cwd=None, git=None):
+        self.p = payload
+        self.plan = plan
+        self.elements = elements
+        self.usage = usage      # claude-usage 캐시 (OAuth usage API 응답)
+        self.cwd = cwd or payload_dir(payload)
+        self._git = git
+
+    def render(self):
+        segments = []
+        for key in self.elements:
+            try:
+                segments.append(getattr(self, 'el_' + key)())
+            except Exception:
+                pass
+        return ' '.join(s for s in segments if s)
+
+    def git(self):
+        if self._git is None:
+            self._git = read_git(self.cwd, 'git_status' in self.elements)
+        return self._git
+
+    def percent_used(self):
+        size = dig(self.p, 'context_window', 'context_window_size')
+        current = dig(self.p, 'context_window', 'current_usage')
+        if not size or not isinstance(current, dict):
+            return None
+        tokens = sum(current.get(k) or 0 for k in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))
+        return tokens * 100 // size if tokens > 0 else None
+
+    def el_dir(self):
+        return paint(C_DIR, short_dir(self.cwd))
+
+    def el_git(self):
+        g = self.git()
+        return paint(C_GIT_BRANCH, BRANCH_ICON + g[0]) if g and g[0] else ''
+
+    def el_git_status(self):
+        g = self.git()
+        if not g:
+            return ''
+        _, dirty, ahead, behind = g
+        return paint(C_GIT_STATUS, ('*' if dirty else '') + (f'↑{ahead}' if ahead else '') + (f'↓{behind}' if behind else ''))
+
+    def el_pr(self):
+        pr = self.p.get('pr') or {}
+        if not pr.get('number'):
+            return ''
+        label = f"MR!{pr['number']}" if pr.get('kind') == 'mr' else f"PR#{pr['number']}"
+        mark = REVIEW_MARKS.get(pr.get('review_state'))
+        return paint(C_PR, link(pr.get('url'), f'{label} {mark}' if mark else label))
+
+    def el_model(self):
+        raw = dig(self.p, 'model', 'display_name') or dig(self.p, 'model', 'id') or ''
+        if not raw:
+            return ''
+        lower = raw.lower()
+        if 'haiku' in lower:
+            icon = HAIKU_NERD
+        elif 'sonnet' in lower:
+            icon = SONNET_NERD
+        elif 'opus' in lower:
+            icon = OPUS_NERD
+        else:
+            icon = SONNET_NERD
+        return paint(C_MODEL, icon + lower)
+
+    def el_effort(self):
+        level = dig(self.p, 'effort', 'level')
+        return paint(C_EFFORT, f"{EFFORT_MARKS.get(level, '◐')} {level}") if level else ''
+
+    def el_thinking(self):
+        return paint(C_THINKING, '✻ think') if dig(self.p, 'thinking', 'enabled') is True else ''
+
+    def el_output_style(self):
+        name = dig(self.p, 'output_style', 'name') or ''
+        return paint(C_STYLE, f'✎ {name.lower()}') if name and name.lower() != 'default' else ''
+
+    def el_version(self):
+        version = self.p.get('version')
+        return paint(C_DIM, f'v{version}') if version else ''
+
+    def el_context(self):
+        pct = self.percent_used()
+        return paint(C_CONTEXT, f'{pct}%'.rjust(3) if pct is not None else '~~%')
+
+    def el_context_tokens(self):
+        size = dig(self.p, 'context_window', 'context_window_size')
+        used = dig(self.p, 'context_window', 'total_input_tokens')
+        return paint(C_CONTEXT, f'{fmt_tokens(used)}/{fmt_tokens(size)}') if size and used is not None else ''
+
+    def el_context_bar(self):
+        pct = self.percent_used()
+        if pct is None:
+            return ''
+        filled = min(10, (pct + 5) // 10)
+        color = C_RED if pct >= PROGRESS_RED else C_YELLOW if pct >= PROGRESS_YELLOW else C_GREEN
+        return paint(color, '█' * filled + '░' * (10 - filled))
+
+    def el_cache(self):
+        cache = self.p.get('prompt_cache') or {}
+        if not cache.get('caching_observed'):
+            return ''
+        if cache.get('warm') is False:
+            return paint(C_RED, 'cache cold')
+        parts = ['cache']
+        if cache.get('hit_ratio') is not None:
+            parts.append(f"{cache['hit_ratio'] * 100:.0f}%")
+        if cache.get('ttl'):
+            parts.append(cache['ttl'])
+        return paint(C_EFFORT, ' '.join(parts))
+
+    def el_cost(self):
+        cost = dig(self.p, 'cost', 'total_cost_usd')
+        return paint(C_GREEN, f'${cost:.2f}') if cost else ''
+
+    def el_lines(self):
+        added = dig(self.p, 'cost', 'total_lines_added') or 0
+        removed = dig(self.p, 'cost', 'total_lines_removed') or 0
+        if not (added or removed):
+            return ''
+        return f'{paint(C_GREEN, f"+{added}")} {paint(C_RED, f"-{removed}")}'
+
+    def el_duration(self):
+        ms = dig(self.p, 'cost', 'total_duration_ms')
+        return paint(C_DIM, f'◷ {fmt_duration(ms / 1000)}') if ms else ''
+
+    def el_plan(self):
+        if self.plan == 'enterprise':
+            return paint(C_PLAN, 'Enterprise')
+        sub = (self.usage or {}).get('subscription_type')
+        return paint(C_PLAN, sub.title() if sub else 'Subscription')
+
+    def el_usage(self):
+        if usage_api is None:
+            return ''
+        return paint(C_USAGE, usage_api.format_usage(self.usage, self.plan, self.p.get('rate_limits')))
+
+    def el_reset(self):
+        if usage_api is None:
+            return ''
+        now = time.time()
+        windows = usage_api.subscription_windows(self.usage, self.p.get('rate_limits'))
+        return paint(C_PR, ' '.join(f'{label}↻{fmt_duration(at - now)}' for label, _, at in windows if at and at > now))
+
+    def el_credits(self):
+        credits = usage_api.monthly_credits(self.usage) if usage_api else None
+        if credits is None:
+            return ''
+        used, limit, _ = credits
+        return paint(C_USAGE, f'rem ${max(0, limit - used):.0f}')
+
+def payload_dir(payload):
+    d = dig(payload, 'workspace', 'current_dir') or dig(payload, 'workspace', 'project_dir') or payload.get('cwd') or ''
+    if d and os.path.isdir(d):
+        return d
+    return os.environ.get('PWD') or os.getcwd()
+
+def load_config():
+    try:
+        with open(CONFIG_FILE) as f:
+            cfg = json.load(f)
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    tmp = CONFIG_FILE + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+    os.replace(tmp, CONFIG_FILE)
+
+def available(plan):
+    return [key for key, _, plans in ELEMENTS if plan in plans]
+
+def enabled_elements(cfg, plan):
+    chosen = dig(cfg, 'elements', plan)
+    if not isinstance(chosen, list):
+        chosen = DEFAULTS[plan]
+    return [key for key in available(plan) if key in chosen]
+
+def resolve_plan(cfg, usage, rate_limits=None):
+    plan = cfg.get('plan', 'auto')
+    if plan in PLANS:
+        return plan
+    return usage_api.detect_plan(usage, rate_limits) if usage_api else 'subscription'
+
+def needs_api(plan, elements, rate_limits):
+    """캐시가 오래됐을 때 API를 다시 부를 만한 요소가 켜져 있는지"""
+    if usage_api is None:
+        return False
+    if plan == 'enterprise':
+        return bool({'usage', 'credits'} & set(elements))
+    # 구독 플랜은 statusLine 입력의 rate_limits에 5h/7d가 실시간으로 들어온다
+    return bool({'usage', 'reset'} & set(elements)) and not usage_api.has_windows(None, rate_limits)
+
+def build_status(payload, cfg):
+    rate_limits = payload.get('rate_limits')
+    usage = usage_api.load_cache() if usage_api else None
+    plan = resolve_plan(cfg, usage, rate_limits)
+    elements = enabled_elements(cfg, plan)
+    if needs_api(plan, elements, rate_limits):
+        usage = usage_api.get_usage()
+        plan = resolve_plan(cfg, usage, rate_limits)
+        elements = enabled_elements(cfg, plan)
+    return Status(payload, plan, elements, usage)
+
+def emit_progress(percent_used):
+    """OSC 9;4 progress bar"""
+    if percent_used is None:
+        return
+    progress_percent = 100 if percent_used >= PROGRESS_COMPACT else percent_used * 100 // PROGRESS_COMPACT
+    if percent_used >= PROGRESS_RED:
+        progress_state = 2
+    elif percent_used >= PROGRESS_YELLOW:
+        progress_state = 4
+    else:
+        progress_state = 1
+    try:
+        with open('/dev/tty', 'w') as tty:
+            tty.write(f'\033]9;4;{progress_state};{progress_percent}\a')
+    except OSError:
+        pass
+
+# --- 미리보기 · 설정 ---
+
+def mock_status(plan, elements):
+    now = time.time()
+    payload = {
+        'model': {'id': 'claude-sonnet-4-6', 'display_name': 'Sonnet 4.6'},
+        'version': '2.1.309',
+        'output_style': {'name': 'Explanatory'},
+        'effort': {'level': 'high'},
+        'thinking': {'enabled': True},
+        'pr': {'number': 53, 'url': 'https://example.com/pull/53', 'review_state': 'approved'},
+        'cost': {'total_cost_usd': 1.23, 'total_duration_ms': 72 * 60 * 1000, 'total_lines_added': 156, 'total_lines_removed': 23},
+        'context_window': {
+            'total_input_tokens': 60000,
+            'context_window_size': 200000,
+            'current_usage': {'input_tokens': 2000, 'cache_creation_input_tokens': 8000, 'cache_read_input_tokens': 50000, 'output_tokens': 900},
+        },
+        'prompt_cache': {'warm': True, 'caching_observed': True, 'ttl': '1h', 'hit_ratio': 0.73},
+    }
+    if plan == 'subscription':
+        payload['rate_limits'] = {
+            'five_hour': {'used_percentage': 12, 'resets_at': now + 3 * 3600 + 51 * 60 + 30},
+            'seven_day': {'used_percentage': 9, 'resets_at': now + 3 * 86400 + 9 * 3600 + 30},
+        }
+        usage = {'subscription_type': 'max'}
+    else:
+        usage = {'subscription_type': 'enterprise',
+                 'extra_usage': {'is_enabled': True, 'used_credits': 44900, 'monthly_limit': 100000, 'utilization': 44.9}}
+    return Status(payload, plan, elements, usage, cwd='/Users/me/workspace/claude-status', git=('main', True, 1, 0))
+
+def plain(text):
+    import re
+    return re.sub(r'\033\]8;;.*?\033\\|\033\[[0-9;]*m', '', text)
+
+def width(text):
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in text)
+
+def pad(text, cols):
+    return text + ' ' * max(0, cols - width(text))
+
+def clip(text, cols):
+    out, used = '', 0
+    for c in text:
+        w = width(c)
+        if used + w > cols:
+            break
+        out += c
+        used += w
+    return out
+
+def example(key, plan):
+    if plan not in dict((k, p) for k, _, p in ELEMENTS)[key]:
+        plan = next(p for p in PLANS if p != plan)
+    return plain(mock_status(plan, [key]).render())
+
+def describe_plan(cfg):
+    usage = usage_api.load_cache() if usage_api else None
+    plan = resolve_plan(cfg, usage)
+    if cfg.get('plan', 'auto') in PLANS:
+        return plan, f'{PLAN_NAMES[plan]} (고정)'
+    sub = (usage or {}).get('subscription_type')
+    return plan, f"{PLAN_NAMES[plan]} (자동 감지{': ' + sub if sub else ''})"
+
+def print_list(cfg):
+    plan, desc = describe_plan(cfg)
+    on = {p: set(enabled_elements(cfg, p)) for p in PLANS}
+    print(f'현재 플랜  {desc}')
+    print(f'설정 파일  {CONFIG_FILE}\n')
+    print(f"{pad('요소', 16)}{pad('구독', 6)}{pad('Ent', 6)}{pad('설명', 46)}예시")
+    for key, desc, plans in ELEMENTS:
+        marks = ''.join(pad(('✔' if key in on[p] else '·') if p in plans else '-', 6) for p in PLANS)
+        print(f'{pad(key, 16)}{marks}{pad(desc, 46)}{example(key, plan)}')
+    progress = '✔' if cfg.get('progress', True) else '·'
+    print(f"{pad('progress', 16)}{pad(progress, 6)}{pad(progress, 6)}{PROGRESS_DESC}")
+
+def edit_elements(cfg, plan, keys, turn_on):
+    keys = list(dict.fromkeys(keys))
+    if 'progress' in keys:
+        cfg['progress'] = turn_on
+        keys.remove('progress')
+    unknown = [k for k in keys if k not in [key for key, _, _ in ELEMENTS]]
+    if unknown:
+        sys.exit(f"없는 요소: {', '.join(unknown)}  (목록: claude-status --list)")
+    other_plan = [k for k in keys if k not in available(plan)]
+    if other_plan:
+        sys.exit(f"{PLAN_NAMES[plan]}에서는 쓸 수 없는 요소: {', '.join(other_plan)}  (대상 플랜은 --plan 으로 지정)")
+    if keys:
+        chosen = set(enabled_elements(cfg, plan))
+        chosen = chosen | set(keys) if turn_on else chosen - set(keys)
+        cfg.setdefault('elements', {})[plan] = [k for k in available(plan) if k in chosen]
+    save_config(cfg)
+    print(f"{PLAN_NAMES[plan]}: {' '.join(enabled_elements(cfg, plan))}")
+
+def print_preview(cfg, plans):
+    for plan in plans:
+        print(f'{pad(PLAN_NAMES[plan], 20)}{mock_status(plan, enabled_elements(cfg, plan)).render()}')
+
+def run_config_ui(cfg):
+    import curses, locale
+    locale.setlocale(locale.LC_ALL, '')
+    current, _ = describe_plan(cfg)
+    chosen = {p: set(enabled_elements(cfg, p)) for p in PLANS}
+    ui = {'tab': PLANS.index(current), 'row': 0, 'top': 0,
+          'plan': cfg.get('plan', 'auto'), 'progress': cfg.get('progress', True)}
+    plan_modes = ('auto',) + PLANS
+
+    def rows():
+        return available(PLANS[ui['tab']]) + ['progress']
+
+    def put(scr, y, x, text, attr=0):
+        h, w = scr.getmaxyx()
+        if 0 <= y < h and x < w:
+            try:
+                scr.addstr(y, x, clip(text, w - x - 1), attr)
+            except curses.error:
+                pass
+
+    def draw(scr):
+        scr.erase()
+        h, w = scr.getmaxyx()
+        plan = PLANS[ui['tab']]
+        put(scr, 0, 1, 'claude-status 설정', curses.A_BOLD)
+        x = 1
+        for i, p in enumerate(PLANS):
+            label = f' {PLAN_NAMES[p]} '
+            put(scr, 2, x, label, curses.A_REVERSE if i == ui['tab'] else curses.A_DIM)
+            x += width(label) + 2
+        put(scr, 2, x + 2, '← → 플랜 전환', curses.A_DIM)
+
+        items = rows()
+        list_h = max(3, h - 10)
+        ui['top'] = min(max(ui['top'], ui['row'] - list_h + 1), ui['row'])
+        descs = dict((k, d) for k, d, _ in ELEMENTS)
+        for line, key in enumerate(items[ui['top']:ui['top'] + list_h]):
+            i = ui['top'] + line
+            is_on = ui['progress'] if key == 'progress' else key in chosen[plan]
+            text = f"{'▸' if i == ui['row'] else ' '} [{'x' if is_on else ' '}] {pad(key, 15)}{pad(descs.get(key, PROGRESS_DESC), 44)}"
+            if key != 'progress':
+                text += example(key, plan)
+            put(scr, 4 + line, 1, text, curses.A_BOLD if i == ui['row'] else 0)
+
+        y = 5 + list_h
+        preview = plain(mock_status(plan, [k for k in available(plan) if k in chosen[plan]]).render())
+        put(scr, y, 1, '미리보기  ', curses.A_DIM)
+        put(scr, y, 11, preview)
+        mode = ui['plan']
+        detect = f'{PLAN_NAMES[mode]}로 고정' if mode in PLANS else f'자동 (지금은 {PLAN_NAMES[current]})'
+        put(scr, y + 1, 1, '플랜 감지  ', curses.A_DIM)
+        put(scr, y + 1, 11, f'{detect}    p 바꾸기')
+        put(scr, y + 3, 1, '↑↓ 이동 · Space 켜기/끄기 · ←→ 플랜 · d 기본값 · Enter 저장 · q 취소', curses.A_DIM)
+        scr.refresh()
+
+    arrows = {ord('A'): curses.KEY_UP, ord('B'): curses.KEY_DOWN, ord('C'): curses.KEY_RIGHT, ord('D'): curses.KEY_LEFT}
+
+    def read_key(scr):
+        key = scr.getch()
+        if key != 27:
+            return key
+        # keypad가 못 알아본 화살표(ESC [ C 등)는 직접 해석하고, ESC만 오면 취소
+        scr.nodelay(True)
+        try:
+            seq = [scr.getch(), scr.getch()]
+        finally:
+            scr.nodelay(False)
+        if seq[0] in (ord('['), ord('O')) and seq[1] in arrows:
+            return arrows[seq[1]]
+        return 27
+
+    def loop(scr):
+        try:
+            curses.curs_set(0)
+            curses.use_default_colors()   # 터미널 테마 배경을 그대로 쓴다
+        except curses.error:
+            pass
+        if hasattr(curses, 'set_escdelay'):
+            curses.set_escdelay(25)
+        while True:
+            draw(scr)
+            key = read_key(scr)
+            items = rows()
+            plan = PLANS[ui['tab']]
+            if key in (curses.KEY_UP, ord('k')):
+                ui['row'] = (ui['row'] - 1) % len(items)
+            elif key in (curses.KEY_DOWN, ord('j')):
+                ui['row'] = (ui['row'] + 1) % len(items)
+            elif key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord('h'), ord('l'), 9):
+                ui['tab'] = (ui['tab'] + 1) % len(PLANS)
+                ui['row'] = min(ui['row'], len(rows()) - 1)
+            elif key == ord(' '):
+                item = items[ui['row']]
+                if item == 'progress':
+                    ui['progress'] = not ui['progress']
+                else:
+                    chosen[plan] ^= {item}
+            elif key == ord('d'):
+                chosen[plan] = set(DEFAULTS[plan])
+            elif key == ord('p'):
+                ui['plan'] = plan_modes[(plan_modes.index(ui['plan']) + 1) % len(plan_modes)] if ui['plan'] in plan_modes else 'auto'
+            elif key in (10, 13, curses.KEY_ENTER):
+                return True
+            elif key in (ord('q'), 27):
+                return False
+
+    if not curses.wrapper(loop):
+        print('취소했습니다.')
+        return
+    cfg['plan'] = ui['plan']
+    cfg['progress'] = ui['progress']
+    cfg['elements'] = {p: [k for k in available(p) if k in chosen[p]] for p in PLANS}
+    save_config(cfg)
+    print(f'저장했습니다: {CONFIG_FILE}')
+    print_preview(cfg, PLANS)
+
+def parse_args(argv):
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog='claude-status',
+        description='Claude Code status line. 인자 없이 실행하면 stdin의 세션 JSON으로 한 줄을 출력합니다.')
+    parser.add_argument('--no-progress', action='store_true', help='OSC 9;4 진행바를 출력하지 않음')
+    parser.add_argument('--config', action='store_true', help='요소 켜고 끄기 (인터랙티브)')
+    parser.add_argument('--list', action='store_true', help='요소 목록과 플랜별 켜짐 상태')
+    parser.add_argument('--enable', nargs='+', metavar='KEY', help='요소 켜기 (쉼표로 여러 개)')
+    parser.add_argument('--disable', nargs='+', metavar='KEY', help='요소 끄기 (쉼표로 여러 개)')
+    parser.add_argument('--plan', choices=PLANS, help='--enable/--disable/--preview 대상 플랜 (기본: 지금 플랜)')
+    parser.add_argument('--set-plan', choices=('auto',) + PLANS, help='플랜 감지를 고정하거나 auto로 되돌림')
+    parser.add_argument('--preview', action='store_true', help='예시 데이터로 플랜별 미리보기')
+    args = parser.parse_args(argv)
+    for name in ('enable', 'disable'):
+        values = getattr(args, name)
+        if values:
+            setattr(args, name, [k.strip() for v in values for k in v.split(',') if k.strip()])
+    return args
+
+def main():
+    args = parse_args(sys.argv[1:]) if len(sys.argv) > 1 else None
+    cfg = load_config()
+
+    if args and (args.config or args.list or args.enable or args.disable or args.set_plan or args.preview):
+        if args.set_plan:
+            cfg['plan'] = args.set_plan
+            save_config(cfg)
+            print(f'플랜 감지: {describe_plan(cfg)[1]}')
+        plan = args.plan or describe_plan(cfg)[0]
+        if args.enable:
+            edit_elements(cfg, plan, args.enable, True)
+        if args.disable:
+            edit_elements(cfg, plan, args.disable, False)
+        if args.list:
+            print_list(cfg)
+        if args.preview:
+            print_preview(cfg, [args.plan] if args.plan else PLANS)
+        if args.config:
+            if not sys.stdin.isatty():
+                sys.exit('--config는 터미널에서 실행하세요.')
+            run_config_ui(cfg)
+        return
+
+    payload = {}
+    if not sys.stdin.isatty():
+        try:
+            payload = json.loads(sys.stdin.read() or '{}')
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+    status = build_status(payload, cfg)
+    print(status.render())
+
+    if cfg.get('progress', True) and not (args and args.no_progress):
+        emit_progress(status.percent_used())
+
+main()
