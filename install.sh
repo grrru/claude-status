@@ -6,6 +6,14 @@ BIN_DIR="$HOME/.local/bin"
 CLAUDE_DIR="$HOME/.claude"
 SETTINGS="$CLAUDE_DIR/settings.json"
 
+open_config=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --no-config) open_config=0; shift ;;
+  *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
 mkdir -p "$BIN_DIR"
 
 install -m 755 "$REPO_DIR/claude-status" "$BIN_DIR/claude-status"
@@ -36,3 +44,10 @@ echo "installed:"
 echo "  $BIN_DIR/claude-status"
 echo "  $BIN_DIR/claude-usage"
 echo "  $SETTINGS (statusLine updated)"
+
+# 터미널에서 실행했으면 바로 요소 선택 화면을 연다
+if [ "$open_config" = "1" ] && [ -t 0 ] && [ -t 1 ]; then
+  "$BIN_DIR/claude-status" --config
+else
+  echo "요소 선택: claude-status --config"
+fi
