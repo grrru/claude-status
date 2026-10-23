@@ -108,7 +108,7 @@ claude-status --preview                                 # 플랜별 미리보기
 | `claude-status` | `~/.local/bin/claude-status` |
 | `claude-usage` | `~/.local/bin/claude-usage` |
 
-`~/.claude/settings.json`의 `statusLine`도 자동으로 설정됩니다.
+`~/.claude/settings.json`의 `statusLine`도 자동으로 설정되고, 설치가 끝나면 요소 선택 화면(`claude-status --config`)이 열립니다. 선택 화면 없이 설치만 하려면 `./install.sh --no-config`.
 
 ## 요구사항
 
@@ -123,5 +123,5 @@ claude-status --preview                                 # 플랜별 미리보기
 ## 수정 후 배포
 
 ```bash
-./install.sh
+./install.sh --no-config
 ```
