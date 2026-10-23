@@ -5,31 +5,20 @@ PROGRESS_COMPACT = 80
 PROGRESS_YELLOW = 40
 PROGRESS_RED = 60
 
-HAIKU_NERD = ' '
-SONNET_NERD = '\U000f06a9 '   # 󰚩
-OPUS_NERD = '\U000f16a6 '     # 󱚦
-BRANCH_ICON = ' '       #
-
-def rgb(r, g, b):
-    return f'\033[38;2;{r};{g};{b}m'
-
-# Catppuccin Latte
-C_DIR = rgb(4, 165, 229)            # Sky
-C_GIT_BRANCH = rgb(234, 118, 203)   # Pink
-C_GIT_STATUS = rgb(136, 57, 239)    # Mauve
-C_MODEL = rgb(114, 135, 253)        # Lavender
-C_CONTEXT = rgb(254, 100, 11)       # Peach
-C_USAGE = rgb(30, 102, 245)         # Blue
-C_PR = rgb(32, 159, 181)            # Sapphire
-C_EFFORT = rgb(23, 146, 153)        # Teal
-C_THINKING = rgb(221, 120, 120)     # Flamingo
-C_STYLE = rgb(220, 138, 120)        # Rosewater
-C_PLAN = rgb(230, 69, 83)           # Maroon
-C_DIM = rgb(140, 143, 161)          # Overlay1
-C_GREEN = rgb(64, 160, 43)          # Green
-C_YELLOW = rgb(223, 142, 29)        # Yellow
-C_RED = rgb(210, 15, 57)            # Red
+# 터미널 테마의 기본 16색만 쓴다 — 라벨은 흐리게, 값은 기본색, 상태만 색으로
 RESET = '\033[0m'
+DIM = '\033[2m'
+TEXT = '\033[22;39m'
+RED, GREEN, YELLOW, BLUE, MAGENTA = (f'\033[22;{n}m' for n in (31, 32, 33, 34, 35))
+SEP = f' {DIM}|{RESET} '
+
+def pcolor(pct):
+    """사용량 색 — 50% 미만 초록, 90% 미만 노랑, 그 이상 빨강"""
+    return GREEN if pct < 50 else YELLOW if pct < 90 else RED
+
+def ctx_color(pct):
+    """컨텍스트 색 — 진행바와 같은 기준"""
+    return RED if pct >= PROGRESS_RED else YELLOW if pct >= PROGRESS_YELLOW else GREEN
 
 CONFIG_FILE = os.path.expanduser('~/.claude/claude-status.json')
 
@@ -40,7 +29,7 @@ PLAN_NAMES = {'subscription': '구독 (Pro/Max/Team)', 'enterprise': 'Enterprise
 ELEMENTS = [
     ('dir',            '디렉토리 (마지막 2단계)',         PLANS),
     ('git',            'git 브랜치',                     PLANS),
-    ('git_status',     'git 변경(*)·ahead/behind',       PLANS),
+    ('git_status',     'git 변경(*)·ahead/behind (브랜치 옆에)', PLANS),
     ('pr',             '열린 PR + 리뷰 상태 (클릭 시 이동)', PLANS),
     ('model',          '모델',                           PLANS),
     ('effort',         'effort 레벨',                    PLANS),
@@ -56,8 +45,8 @@ ELEMENTS = [
     ('duration',       '세션 경과 시간',                   PLANS),
     ('plan',           '플랜 이름',                        PLANS),
     ('usage',          '사용량 (구독: 5h/7d, Enterprise: 월 크레딧)', PLANS),
-    ('reset',          '5h/7d 리셋까지 남은 시간',          ('subscription',)),
-    ('credits',        '이번 달 남은 크레딧',               ('enterprise',)),
+    ('reset',          '5h/7d 리셋까지 남은 시간 (usage 옆에)', ('subscription',)),
+    ('credits',        '이번 달 남은 크레딧 (usage 옆에)',      ('enterprise',)),
 ]
 
 DEFAULTS = {
@@ -67,8 +56,11 @@ DEFAULTS = {
 
 PROGRESS_DESC = '터미널 진행바 (OSC 9;4, 두 플랜 공통)'
 
-EFFORT_MARKS = {'low': '○', 'medium': '◐', 'high': '●', 'xhigh': '◉', 'max': '✦'}
+EFFORT_MARKS = {'low': '○', 'medium': '◐', 'high': '●', 'xhigh': '◉', 'max': '★', 'ultra': '⚡'}
+EFFORT_COLORS = {'low': GREEN, 'medium': YELLOW, 'high': YELLOW, 'xhigh': RED, 'max': MAGENTA, 'ultra': MAGENTA}
 REVIEW_MARKS = {'approved': '✓', 'pending': '●', 'changes_requested': '✗', 'draft': '◌'}
+REVIEW_COLORS = {'approved': GREEN, 'pending': YELLOW, 'changes_requested': RED, 'draft': DIM}
+PLAN_COLORS = {'enterprise': MAGENTA, 'team': BLUE, 'max': YELLOW, 'pro': GREEN}
 
 def load_usage_module():
     """같은 폴더의 claude-usage를 모듈로 읽는다 (API·자격증명은 그쪽에만 있다)"""
@@ -126,6 +118,9 @@ def fmt_duration(seconds):
         return f'{minutes}m'
     return f'{secs}s'
 
+def ahead_behind(ahead, behind):
+    return (f'↑{ahead}' if ahead else '') + (f'↓{behind}' if behind else '')
+
 def read_git(cwd, with_status):
     """(branch, dirty, ahead, behind) — git 저장소가 아니면 ()"""
     env = dict(os.environ, GIT_OPTIONAL_LOCKS='0')
@@ -169,7 +164,7 @@ class Status:
                 segments.append(getattr(self, 'el_' + key)())
             except Exception:
                 pass
-        return ' '.join(s for s in segments if s)
+        return SEP.join(s for s in segments if s)
 
     def git(self):
         if self._git is None:
@@ -184,127 +179,150 @@ class Status:
         tokens = sum(current.get(k) or 0 for k in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))
         return tokens * 100 // size if tokens > 0 else None
 
+    def repo_url(self):
+        repo = dig(self.p, 'workspace', 'repo') or {}
+        if repo.get('host') and repo.get('owner') and repo.get('name'):
+            return f"https://{repo['host']}/{repo['owner']}/{repo['name']}"
+        return None
+
     def el_dir(self):
-        return paint(C_DIR, short_dir(self.cwd))
+        head, sep, name = short_dir(self.cwd).rpartition('/')
+        return f'{DIM}{head}{sep}{RESET}{name}' if sep else name
 
     def el_git(self):
         g = self.git()
-        return paint(C_GIT_BRANCH, BRANCH_ICON + g[0]) if g and g[0] else ''
+        if not g or not g[0]:
+            return ''
+        branch, dirty, ahead, behind = g
+        branch = link(self.repo_url(), branch)
+        if 'git_status' not in self.elements:
+            return paint(BLUE, branch)
+        return paint(YELLOW if dirty else BLUE, branch + ('*' if dirty else '')) + paint(DIM, ahead_behind(ahead, behind))
 
     def el_git_status(self):
         g = self.git()
-        if not g:
+        if not g or 'git' in self.elements:   # git이 켜져 있으면 브랜치 옆에 붙는다
             return ''
         _, dirty, ahead, behind = g
-        return paint(C_GIT_STATUS, ('*' if dirty else '') + (f'↑{ahead}' if ahead else '') + (f'↓{behind}' if behind else ''))
+        return paint(YELLOW, '*' if dirty else '') + paint(DIM, ahead_behind(ahead, behind))
 
     def el_pr(self):
         pr = self.p.get('pr') or {}
         if not pr.get('number'):
             return ''
-        label = f"MR!{pr['number']}" if pr.get('kind') == 'mr' else f"PR#{pr['number']}"
-        mark = REVIEW_MARKS.get(pr.get('review_state'))
-        return paint(C_PR, link(pr.get('url'), f'{label} {mark}' if mark else label))
+        state = pr.get('review_state')
+        kind, number = ('MR', f"!{pr['number']}") if pr.get('kind') == 'mr' else ('PR', f"#{pr['number']}")
+        mark = f' {REVIEW_MARKS[state]}' if state in REVIEW_MARKS else ''
+        return f'{DIM}{kind}{REVIEW_COLORS.get(state, TEXT)}{link(pr.get("url"), number)}{mark}{RESET}'
 
     def el_model(self):
-        raw = dig(self.p, 'model', 'display_name') or dig(self.p, 'model', 'id') or ''
-        if not raw:
-            return ''
-        lower = raw.lower()
-        if 'haiku' in lower:
-            icon = HAIKU_NERD
-        elif 'sonnet' in lower:
-            icon = SONNET_NERD
-        elif 'opus' in lower:
-            icon = OPUS_NERD
-        else:
-            icon = SONNET_NERD
-        return paint(C_MODEL, icon + lower)
+        name = dig(self.p, 'model', 'display_name') or dig(self.p, 'model', 'id') or ''
+        return name.replace('Claude ', '')
 
     def el_effort(self):
         level = dig(self.p, 'effort', 'level')
-        return paint(C_EFFORT, f"{EFFORT_MARKS.get(level, '◐')} {level}") if level else ''
+        if not level:
+            return ''
+        return f"{paint(EFFORT_COLORS.get(level, TEXT), EFFORT_MARKS.get(level, '◐'))} {level}"
 
     def el_thinking(self):
-        return paint(C_THINKING, '✻ think') if dig(self.p, 'thinking', 'enabled') is True else ''
+        return f'{paint(MAGENTA, "✻")} {DIM}think{RESET}' if dig(self.p, 'thinking', 'enabled') is True else ''
 
     def el_output_style(self):
         name = dig(self.p, 'output_style', 'name') or ''
-        return paint(C_STYLE, f'✎ {name.lower()}') if name and name.lower() != 'default' else ''
+        return f'{DIM}style{RESET} {name}' if name and name.lower() != 'default' else ''
 
     def el_version(self):
         version = self.p.get('version')
-        return paint(C_DIM, f'v{version}') if version else ''
+        return paint(DIM, f'v{version}') if version else ''
 
     def el_context(self):
         pct = self.percent_used()
-        return paint(C_CONTEXT, f'{pct}%'.rjust(3) if pct is not None else '~~%')
+        return f'{DIM}ctx {RESET}' + (paint(ctx_color(pct), f'{pct}%') if pct is not None else paint(DIM, '--'))
 
     def el_context_tokens(self):
         size = dig(self.p, 'context_window', 'context_window_size')
         used = dig(self.p, 'context_window', 'total_input_tokens')
-        return paint(C_CONTEXT, f'{fmt_tokens(used)}/{fmt_tokens(size)}') if size and used is not None else ''
+        if not size or used is None:
+            return ''
+        return f'{ctx_color(used * 100 // size)}{fmt_tokens(used)}{DIM}/{fmt_tokens(size)}{RESET}'
 
     def el_context_bar(self):
         pct = self.percent_used()
         if pct is None:
             return ''
         filled = min(10, (pct + 5) // 10)
-        color = C_RED if pct >= PROGRESS_RED else C_YELLOW if pct >= PROGRESS_YELLOW else C_GREEN
-        return paint(color, '█' * filled + '░' * (10 - filled))
+        return paint(ctx_color(pct), '█' * filled + '░' * (10 - filled))
 
     def el_cache(self):
         cache = self.p.get('prompt_cache') or {}
         if not cache.get('caching_observed'):
             return ''
         if cache.get('warm') is False:
-            return paint(C_RED, 'cache cold')
-        parts = ['cache']
+            return f'{DIM}cache {RED}cold{RESET}'
+        text = f'{DIM}cache{RESET}'
         if cache.get('hit_ratio') is not None:
-            parts.append(f"{cache['hit_ratio'] * 100:.0f}%")
+            hit = cache['hit_ratio'] * 100
+            text += f' {paint(pcolor(100 - hit), f"{hit:.0f}%")}'
         if cache.get('ttl'):
-            parts.append(cache['ttl'])
-        return paint(C_EFFORT, ' '.join(parts))
+            text += f' {DIM}{cache["ttl"]}{RESET}'
+        return text
 
     def el_cost(self):
         cost = dig(self.p, 'cost', 'total_cost_usd')
-        return paint(C_GREEN, f'${cost:.2f}') if cost else ''
+        return f'{DIM}${RESET}{cost:.2f}' if cost else ''
 
     def el_lines(self):
         added = dig(self.p, 'cost', 'total_lines_added') or 0
         removed = dig(self.p, 'cost', 'total_lines_removed') or 0
         if not (added or removed):
             return ''
-        return f'{paint(C_GREEN, f"+{added}")} {paint(C_RED, f"-{removed}")}'
+        return f'{paint(GREEN, f"+{added}")} {paint(RED, f"-{removed}")}'
 
     def el_duration(self):
         ms = dig(self.p, 'cost', 'total_duration_ms')
-        return paint(C_DIM, f'◷ {fmt_duration(ms / 1000)}') if ms else ''
+        return f'{DIM}time{RESET} {fmt_duration(ms / 1000)}' if ms else ''
 
     def el_plan(self):
-        if self.plan == 'enterprise':
-            return paint(C_PLAN, 'Enterprise')
-        sub = (self.usage or {}).get('subscription_type')
-        return paint(C_PLAN, sub.title() if sub else 'Subscription')
+        sub = 'enterprise' if self.plan == 'enterprise' else ((self.usage or {}).get('subscription_type') or '').lower()
+        return paint(PLAN_COLORS.get(sub, TEXT), sub.title() if sub else 'Subscription')
 
     def el_usage(self):
         if usage_api is None:
             return ''
-        return paint(C_USAGE, usage_api.format_usage(self.usage, self.plan, self.p.get('rate_limits')))
+        if self.plan == 'enterprise':
+            credits = usage_api.monthly_credits(self.usage)
+            if credits is None:
+                return ''
+            used, limit, pct = credits
+            text = f'{DIM}mo {RESET}{paint(pcolor(pct), f"{pct:.0f}%")} {DIM}${used:.0f}/${limit:.0f}{RESET}'
+            if 'credits' in self.elements:
+                text += f' {DIM}(rem {RESET}${max(0, limit - used):.0f}{DIM}){RESET}'
+            return text
+
+        # Pro/Max/Team: 창마다 '5h 12% (3h51m)'
+        now = time.time()
+        windows = []
+        for label, pct, at in usage_api.subscription_windows(self.usage, self.p.get('rate_limits')):
+            text = f'{DIM}{label} {RESET}{paint(pcolor(pct), f"{pct:.0f}%")}'
+            if 'reset' in self.elements and at and at > now:
+                text += f' {DIM}({fmt_duration(at - now)}){RESET}'
+            windows.append(text)
+        return SEP.join(windows)
 
     def el_reset(self):
-        if usage_api is None:
+        if usage_api is None or 'usage' in self.elements:   # usage가 켜져 있으면 각 창 옆에 붙는다
             return ''
         now = time.time()
         windows = usage_api.subscription_windows(self.usage, self.p.get('rate_limits'))
-        return paint(C_PR, ' '.join(f'{label}↻{fmt_duration(at - now)}' for label, _, at in windows if at and at > now))
+        return SEP.join(f'{DIM}{label} ↻ {RESET}{fmt_duration(at - now)}' for label, _, at in windows if at and at > now)
 
     def el_credits(self):
         credits = usage_api.monthly_credits(self.usage) if usage_api else None
-        if credits is None:
+        if credits is None or 'usage' in self.elements:   # usage가 켜져 있으면 그 옆에 붙는다
             return ''
         used, limit, _ = credits
-        return paint(C_USAGE, f'rem ${max(0, limit - used):.0f}')
+        return f'{DIM}rem {RESET}${max(0, limit - used):.0f}'
 
 def payload_dir(payload):
     d = dig(payload, 'workspace', 'current_dir') or dig(payload, 'workspace', 'project_dir') or payload.get('cwd') or ''
@@ -434,7 +452,9 @@ def clip(text, cols):
 def example(key, plan):
     if plan not in dict((k, p) for k, _, p in ELEMENTS)[key]:
         plan = next(p for p in PLANS if p != plan)
-    return plain(mock_status(plan, [key]).render())
+    # 옆에 붙는 요소는 붙을 자리와 함께 보여 준다
+    parent = {'git_status': 'git', 'reset': 'usage', 'credits': 'usage'}.get(key)
+    return plain(mock_status(plan, [k for k in available(plan) if k in (key, parent)]).render())
 
 def describe_plan(cfg):
     usage = usage_api.load_cache() if usage_api else None
