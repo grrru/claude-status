@@ -5,6 +5,9 @@ PROGRESS_COMPACT = 80
 PROGRESS_YELLOW = 40
 PROGRESS_RED = 60
 
+# Claude Code는 status line 앞에 두 칸을 띄우고 그린다 (statusLine.padding 0 기준)
+STATUS_INDENT = 2
+
 # 터미널 테마의 기본 16색만 쓴다 — 라벨은 흐리게, 값은 기본색, 상태만 색으로
 RESET = '\033[0m'
 DIM = '\033[2m'
@@ -27,7 +30,7 @@ PLAN_NAMES = {'subscription': '구독 (Pro/Max/Team)', 'enterprise': 'Enterprise
 
 # (키, 설명, 쓸 수 있는 플랜) — 이 순서대로 그린다
 ELEMENTS = [
-    ('dir',            '디렉토리 (마지막 2단계)',         PLANS),
+    ('dir',            '디렉토리 (마지막 2단계, 좁으면 1단계)', PLANS),
     ('git',            'git 브랜치',                     PLANS),
     ('git_status',     'git 변경(*)·ahead/behind (브랜치 옆에)', PLANS),
     ('pr',             '열린 PR + 리뷰 상태 (클릭 시 이동)', PLANS),
@@ -94,9 +97,11 @@ def paint(color, text):
 def link(url, text):
     return f'\033]8;;{url}\033\\{text}\033]8;;\033\\' if url else text
 
-def short_dir(path):
+def short_dir(path, depth=2):
     parts = path.split('/')
-    return '/'.join(parts[-2:]) if len(parts) > 2 else path
+    if len(parts) <= depth:
+        return path
+    return '/'.join(parts[-depth:]) or path
 
 def fmt_tokens(n):
     if n >= 1_000_000:
@@ -156,8 +161,17 @@ class Status:
         self.usage = usage      # claude-usage 캐시 (OAuth usage API 응답)
         self.cwd = cwd or payload_dir(payload)
         self._git = git
+        self.dir_depth = 2
 
-    def render(self):
+    def render(self, cols=None):
+        line = self.render_line()
+        # 터미널보다 길면 dir을 마지막 1단계로 줄여 뒤쪽 요소(7d 등)가 들어갈 자리를 만든다
+        if cols and 'dir' in self.elements and width(plain(line)) > cols - STATUS_INDENT:
+            self.dir_depth = 1
+            line = self.render_line()
+        return line
+
+    def render_line(self):
         segments = []
         for key in self.elements:
             try:
@@ -186,7 +200,7 @@ class Status:
         return None
 
     def el_dir(self):
-        head, sep, name = short_dir(self.cwd).rpartition('/')
+        head, sep, name = short_dir(self.cwd, self.dir_depth).rpartition('/')
         return f'{DIM}{head}{sep}{RESET}{name}' if sep else name
 
     def el_git(self):
@@ -668,7 +682,9 @@ def main():
             payload = {}
 
     status = build_status(payload, cfg)
-    print(status.render())
+    # Claude Code는 출력을 가로채므로 터미널 너비를 COLUMNS로 넘겨준다
+    cols = os.environ.get('COLUMNS', '')
+    print(status.render(int(cols) if cols.isdigit() else None))
 
     if cfg.get('progress', True) and not (args and args.no_progress):
         emit_progress(status.percent_used())

@@ -40,7 +40,7 @@ Enterprise  workspace/claude-status | main | Sonnet 4.6 | ctx 30% | $1.23 | mo 4
 
 | 요소 | 설명 | 예시 | 구독 | Ent |
 |------|------|------|:---:|:---:|
-| `dir` | 디렉토리 (마지막 2단계, 상위는 흐리게) | `workspace/claude-status` | ✔ | ✔ |
+| `dir` | 디렉토리 (마지막 2단계, 상위는 흐리게). 한 줄이 터미널보다 길면 마지막 1단계만 | `workspace/claude-status` | ✔ | ✔ |
 | `git` | git 브랜치 (클릭 시 저장소로 이동) | `main` | ✔ | ✔ |
 | `git_status` | git 변경(`*`)·ahead/behind — `git`이 켜져 있으면 브랜치 옆에 | `main*↑1` | | |
 | `pr` | 열린 PR + 리뷰 상태 (클릭 시 이동) | `PR#53 ✓` | | |
